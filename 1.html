@@ -1,0 +1,2000 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Legend of KAGE - Клон</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            border: 2px solid #fff;
+            background-color: #000;
+            border-radius: 10px;
+            max-width: 100%;
+            max-height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- Инициализация игры при загрузке окна ---
+        window.addEventListener('load', function() {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 1280;
+            canvas.height = 720;
+
+            // --- ОБЪЕКТ-КОНФИГУРАЦИЯ ИГРЫ ---
+            const GAME_CONFIG = {
+                // Player settings
+                PLAYER_INVULNERABILITY_DURATION: 2000,
+                PLAYER_RESPAWN_DELAY: 1000,
+                PLAYER_HIDE_COOLDOWN: 4000,
+
+                // Character base stats
+                BASE_MAX_SPEED: 6.7,
+                BASE_JUMP_STRENGTH: -29.7,
+                BASE_SHURIKEN_COOLDOWN: 2000,
+                BASE_ATTACK_COOLDOWN: 500,
+
+                // GroundNinja AI
+                GROUNDNINJA_REPOSITION_TIME: 1500,
+                GROUNDNINJA_DEATH_DELAY: 1000,
+                
+                // CloudNinja AI
+                CLOUDNINJA_DEATH_DELAY: 7000,
+
+                // NinjaBOSS1 Stats & AI
+                BOSS_SCALE: 1.25,
+                BOSS_JUMP_MULTIPLIER: 2,
+                BOSS_SHURIKEN_COOLDOWN_MULTIPLIER: 0.7,
+                BOSS_SHURIKEN_SPEED_MULTIPLIER: 1.2,
+                BOSS_MAX_RUN_TIME: 3500,
+                BOSS_FOCUS_DURATION: 10000,
+                BOSS_COVERT_ATTACK_INTERVAL: 15000,
+
+                // Shuriken settings
+                SHURIKEN_SPEED: 9.36,
+
+                // Death animation physics
+                DYNAMIC_DEATH_JUMP_IMPULSE: -15,
+                DYNAMIC_DEATH_ROTATION_SPEED: 0.4,
+                FUNNY_DEATH_JUMP_IMPULSE: -30,
+                FUNNY_DEATH_ROTATION_SPEED: 0.4,
+
+                // UI Text
+                START_SCREEN_TITLE: "ЛЕГЕНДА О ТЕНИ",
+                START_SCREEN_DESCRIPTION: "Вы - тень в ночи, последний из своего клана. Орды вражеских ниндзя и их безжалостный лидер захватили ваши земли. Используйте свою скорость, хитрость и смертоносные сюрикены, чтобы вернуть то, что принадлежит вам по праву.",
+                START_SCREEN_CONTROLS_TITLE: "УПРАВЛЕНИЕ:",
+                START_SCREEN_CONTROLS: "A/D - Движение | ПРОБЕЛ - Прыжок | SHIFT - Присесть (спрятаться в кустах) | ЛКМ - Бросить сюрикен | ПКМ - Удар мечом | TAB - Пауза",
+                START_SCREEN_PROMPT: "Нажмите ENTER для начала",
+                PAUSE_SCREEN_TITLE: "ПАУЗА",
+                PAUSE_SCREEN_STATS_TITLE: "УБИТО ЗА СЕССИЮ:",
+                PAUSE_SCREEN_PROMPT: "Нажмите TAB для продолжения",
+            };
+
+            // --- Вспомогательная функция для смешивания цветов ---
+            function lerpColor(colorA, colorB, amount) {
+                const [rA, gA, bA] = colorA;
+                const [rB, gB, bB] = colorB;
+                const r = Math.round(rA + (rB - rA) * amount);
+                const g = Math.round(gA + (gB - gA) * amount);
+                const b = Math.round(bA + (bB - bA) * amount);
+                return `rgb(${r}, ${g}, ${b})`;
+            }
+
+            // --- Система Состояний (State Machine) для Анимации ---
+            const states = {
+                IDLE: 0,
+                RUNNING: 1,
+                JUMPING: 2,
+                FALLING: 3,
+                ATTACKING: 4,
+                THROWING: 5,
+                DEAD: 6,
+                CROUCHING: 7,
+                AIR_DEAD: 8,
+                FUNNY_CLOUD_DEATH: 9, 
+                DYNAMIC_GROUND_DEATH: 10,
+            };
+            
+            const gameStates = {
+                START_SCREEN: 0,
+                RUNNING: 1,
+                PAUSED: 2,
+            };
+
+            class State {
+                constructor(state, character) {
+                    this.state = state;
+                    this.character = character;
+                }
+            }
+
+            // Логика состояний
+            class Idle extends State {
+                constructor(character) { super('IDLE', character); }
+                enter() { this.character.maxFrame = 0; }
+                handleInput(input) {
+                    if (this.character.health <= 0) { this.character.setState(states.DEAD); } 
+                    else if (input.keys.includes('ShiftLeft')) { this.character.setState(states.CROUCHING); } 
+                    else if (input.keys.includes('KeyD') || input.keys.includes('KeyA')) { this.character.setState(states.RUNNING); } 
+                    else if (input.keys.includes('Space')) { this.character.setState(states.JUMPING); } 
+                    else if (input.mouse.rightPressed && !input.mouse.isRightClickHandled && this.character.canAttack()) { this.character.setState(states.ATTACKING); } 
+                    else if (input.mouse.leftPressed && !input.mouse.isLeftClickHandled && this.character.canAttack() && this.character.canThrowShuriken()) { this.character.setState(states.THROWING); }
+                }
+            }
+
+            class Running extends State {
+                constructor(character) { super('RUNNING', character); }
+                enter() { this.character.maxFrame = 5; }
+                handleInput(input) {
+                    if (this.character.health <= 0) { this.character.setState(states.DEAD); } 
+                    else if (this.character.speed === 0 && this.character.onGround()) { this.character.setState(states.IDLE); } 
+                    else if (input.keys.includes('ShiftLeft')) { this.character.setState(states.CROUCHING); } 
+                    else if (input.keys.includes('Space')) { this.character.setState(states.JUMPING); } 
+                    else if (input.mouse.rightPressed && !input.mouse.isRightClickHandled && this.character.canAttack()) { this.character.setState(states.ATTACKING); } 
+                    else if (input.mouse.leftPressed && !input.mouse.isLeftClickHandled && this.character.canAttack() && this.character.canThrowShuriken()) { this.character.setState(states.THROWING); }
+                }
+            }
+            
+            class Jumping extends State {
+                constructor(character) { super('JUMPING', character); }
+                enter() {
+                    if (this.character.onGround() || this.character instanceof CloudNinja || this.character instanceof NinjaBOSS1) {
+                        this.character.vy = this.character.jumpStrength; 
+                        this.character.airSpeed = this.character.speed;
+                    }
+                    this.character.maxFrame = 0;
+                }
+                handleInput(input) {
+                    if (this.character.health <= 0) { this.character.setState(states.AIR_DEAD); } 
+                    else if (this.character.vy > this.character.weight) { this.character.setState(states.FALLING); } 
+                    else if (input.mouse.rightPressed && !input.mouse.isRightClickHandled && this.character.canAttack()) { this.character.setState(states.ATTACKING); } 
+                    else if (input.mouse.leftPressed && !input.mouse.isLeftClickHandled && this.character.canAttack() && this.character.canThrowShuriken()) { this.character.setState(states.THROWING); }
+                }
+            }
+
+            class Falling extends State {
+                 constructor(character) { super('FALLING', character); }
+                enter() { this.character.maxFrame = 0; }
+                handleInput(input) {
+                    if (this.character.health <= 0) { this.character.setState(states.AIR_DEAD); } 
+                    else if (this.character.onGround()) { this.character.setState(states.IDLE); } 
+                    else if (input.mouse.rightPressed && !input.mouse.isRightClickHandled && this.character.canAttack()) { this.character.setState(states.ATTACKING); } 
+                    else if (input.mouse.leftPressed && !input.mouse.isLeftClickHandled && this.character.canAttack() && this.character.canThrowShuriken()) { this.character.setState(states.THROWING); }
+                }
+            }
+            
+            class Attacking extends State {
+                constructor(character) { super('ATTACKING', character); }
+                enter() {
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 3;
+                    if (this.character instanceof Player) { this.character.game.input.mouse.isRightClickHandled = true; }
+                }
+                handleInput() {
+                    if (this.character.health <= 0) { this.character.onGround() ? this.character.setState(states.DEAD) : this.character.setState(states.AIR_DEAD); } 
+                    else if (this.character.frameX >= this.character.maxFrame) {
+                        this.character.resetAttackCooldown();
+                        if (this.character.onGround()) this.character.setState(states.IDLE);
+                        else this.character.setState(states.FALLING);
+                    }
+                }
+            }
+
+            class Throwing extends State {
+                constructor(character) { super('THROWING', character); }
+                enter() {
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 3;
+                    if (this.character instanceof Player) { this.character.game.input.mouse.isLeftClickHandled = true; }
+                    this.character.resetShurikenCooldown();
+                    this.hasThrown = false;
+                }
+                handleInput() {
+                    if (this.character.health <= 0) { this.character.onGround() ? this.character.setState(states.DEAD) : this.character.setState(states.AIR_DEAD); } 
+                    else if (this.character.frameX === 2 && !this.hasThrown) {
+                        this.character.spawnShuriken();
+                        this.hasThrown = true;
+                    }
+                    if (this.character.frameX >= this.character.maxFrame) {
+                        this.character.resetAttackCooldown();
+                        if (this.character.onGround()) this.character.setState(states.IDLE);
+                        else this.character.setState(states.FALLING);
+                    }
+                }
+            }
+            
+            class Dead extends State {
+                constructor(character) { super('DEAD', character); }
+                enter() {
+                    this.character.isDead = true;
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 4;
+                    this.character.fps = 8;
+                    this.character.rotation = 0;
+                    this.character.rotationSpeed = 0;
+                }
+                handleInput() {}
+            }
+            
+            class AirDead extends State {
+                constructor(character) { super('AIR_DEAD', character); }
+                enter() {
+                    this.character.isDead = true;
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 4;
+                    this.character.fps = 8;
+                    this.character.rotationSpeed = (Math.random() - 0.5) * 0.2;
+                }
+                handleInput() {
+                    if(this.character.onGround()){
+                        this.character.setState(states.DEAD);
+                    }
+                }
+            }
+
+            class FunnyCloudDeath extends State {
+                constructor(character) { super('FUNNY_CLOUD_DEATH', character); }
+                enter() {
+                    this.character.isDead = true;
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 4;
+                    this.character.fps = 8;
+                    this.character.rotationSpeed = (Math.random() - 0.5) * GAME_CONFIG.FUNNY_DEATH_ROTATION_SPEED;
+                    this.character.vy = GAME_CONFIG.FUNNY_DEATH_JUMP_IMPULSE; // Impulse jump
+                    const direction = Math.random() < 0.5 ? -1 : 1;
+                    this.character.airSpeed = this.character.maxSpeed * 0.5 * direction;
+                    this.character.weight = 1; // Enable gravity
+                }
+                handleInput() {
+                    if(this.character.onGround()){
+                        this.character.setState(states.DEAD);
+                    }
+                }
+            }
+
+            class DynamicGroundDeath extends State {
+                constructor(character) { super('DYNAMIC_GROUND_DEATH', character); }
+                enter() {
+                    this.character.isDead = true;
+                    this.character.frameX = 0;
+                    this.character.maxFrame = 4;
+                    this.character.fps = 8;
+                    this.character.rotationSpeed = (Math.random() - 0.5) * GAME_CONFIG.DYNAMIC_DEATH_ROTATION_SPEED;
+                    this.character.vy = GAME_CONFIG.DYNAMIC_DEATH_JUMP_IMPULSE; // Half impulse jump
+                    const direction = Math.random() < 0.5 ? -1 : 1;
+                    this.character.airSpeed = this.character.maxSpeed * 0.5 * direction;
+                    this.character.weight = 1; // Enable gravity
+                }
+                handleInput() {
+                    if(this.character.onGround()){
+                        this.character.setState(states.DEAD);
+                    }
+                }
+            }
+            
+            class Crouching extends State {
+                constructor(character) { super('CROUCHING', character); }
+                enter() {
+                    this.character.maxFrame = 0;
+                    this.character.speed = 0;
+                }
+                handleInput(input) {
+                    if (this.character.health <= 0) { this.character.setState(states.DEAD); } 
+                    else if (!input.keys.includes('ShiftLeft')) { this.character.setState(states.IDLE); }
+                }
+            }
+
+            // --- Базовые классы (Архитектура) ---
+            class Layer {
+                constructor(game) { this.game = game; }
+                update(deltaTime) {}
+                draw(context) {}
+            }
+            
+            class ParallaxLayer extends Layer {
+                constructor(game, speedModifier, color, yOffset, amplitude, frequency) {
+                    super(game);
+                    this.speedModifier = speedModifier;
+                    this.color = color;
+                    this.yOffset = yOffset;
+                    this.amplitude = amplitude;
+                    this.frequency = frequency;
+                    this.terrainData = [];
+                    this.gameObjects = []; 
+                    this.generateTerrain();
+                }
+
+                generateTerrain() {
+                    const baseHeight = this.game.worldHeight - this.game.interactiveLayer.baseGroundHeight + this.yOffset;
+                    for (let i = 0; i <= this.game.worldWidth; i++) {
+                        const wave = Math.sin(i * this.frequency) * this.amplitude;
+                        this.terrainData.push(baseHeight + wave);
+                    }
+                }
+
+                draw(context) {
+                    context.save();
+                    context.fillStyle = this.color;
+                    const parallaxX = this.game.cameraX * this.speedModifier;
+                    context.translate(-parallaxX, 0);
+                    context.beginPath();
+                    context.moveTo(0, this.game.worldHeight);
+                    for (let i = 0; i < this.game.worldWidth; i++) {
+                        context.lineTo(i, this.terrainData[i]);
+                    }
+                    context.lineTo(this.game.worldWidth, this.game.worldHeight);
+                    context.closePath();
+                    context.fill();
+                    context.restore();
+                }
+            }
+
+            class InteractiveLayer extends Layer {
+                constructor(game) {
+                    super(game);
+                    this.gameObjects = [];
+                    this.baseGroundHeight = 130; 
+                    this.terrainData = [];
+                }
+
+                generateTerrain() {
+                    const amplitude = 40; 
+                    const frequency1 = 0.0025;
+                    const frequency2 = 0.0075;
+                    const frequency3 = 0.001;
+
+                    for (let i = 0; i <= this.game.worldWidth; i++) {
+                        const wave1 = Math.sin(i * frequency1) * amplitude * 0.5;
+                        const wave2 = Math.sin(i * frequency2) * amplitude * 0.25;
+                        const wave3 = Math.sin(i * frequency3) * amplitude * 0.25;
+                        const y = this.game.worldHeight - this.baseGroundHeight + wave1 + wave2 + wave3;
+                        this.terrainData.push(y);
+                    }
+                }
+
+                getGroundY(x) {
+                    const index = Math.max(0, Math.floor(x));
+                    return this.terrainData[index] || this.game.worldHeight - this.baseGroundHeight;
+                }
+
+                update(deltaTime) {
+                    this.gameObjects.forEach(obj => obj.update(deltaTime));
+                    this.checkCollisions();
+                    this.gameObjects = this.gameObjects.filter(obj => !obj.markedForDeletion);
+                }
+
+                checkCollisions() {
+                    const characters = this.gameObjects.filter(obj => obj instanceof Character && !obj.isDead);
+                    const projectiles = this.gameObjects.filter(obj => obj instanceof Shuriken);
+
+                    projectiles.forEach(projectile => {
+                        characters.forEach(character => {
+                            if (projectile.owner !== character) {
+                                for (const key in character.hitboxes) {
+                                    const hitbox = character.hitboxes[key];
+                                    if (this.isRectCollision(projectile, hitbox)) {
+                                        const damage = character.maxHealth;
+                                        character.takeDamage(damage, projectile.owner);
+                                        projectile.markedForDeletion = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    });
+                    
+                    characters.forEach(attacker => {
+                        if (attacker.currentState.state === 'ATTACKING' && attacker.frameX === 2) {
+                             characters.forEach(target => {
+                                if (attacker !== target) {
+                                    for (const key in target.hitboxes) {
+                                        const hitbox = target.hitboxes[key];
+                                        if (this.isRectCollision(attacker.swordHitbox, hitbox)) {
+                                            const damage = target.maxHealth;
+                                            target.takeDamage(damage, attacker);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+
+                isRectCollision(rect1, rect2) {
+                    return (
+                        rect1.x < rect2.x + rect2.width &&
+                        rect1.x + rect1.width > rect2.x &&
+                        rect1.y < rect2.y + rect2.height &&
+                        rect1.y + rect1.height > rect2.y
+                    );
+                }
+
+                draw(context) {
+                    context.fillStyle = '#142a12';
+                    context.beginPath();
+                    context.moveTo(0, this.game.worldHeight);
+                    for (let i = 0; i < this.game.worldWidth; i++) {
+                        context.lineTo(i, this.terrainData[i]);
+                    }
+                    context.lineTo(this.game.worldWidth, this.game.worldHeight);
+                    context.closePath();
+                    context.fill();
+                    
+                    this.gameObjects.sort((a, b) => a.y + a.height - (b.y + b.height));
+                    this.gameObjects.forEach(obj => obj.draw(context));
+                }
+                addGameObject(object) {
+                    object.layer = this; 
+                    this.gameObjects.push(object);
+                }
+            }
+
+            class DecorativeLayer extends Layer {
+                constructor(game, speedModifier = 1) {
+                    super(game);
+                    this.gameObjects = [];
+                    this.speedModifier = speedModifier;
+                }
+                update(deltaTime) {
+                    this.gameObjects.forEach(obj => obj.update(deltaTime));
+                }
+                draw(context) {
+                    context.save();
+                    const parallaxX = this.game.cameraX * this.speedModifier;
+                    context.translate(-parallaxX, 0);
+                    this.gameObjects.forEach(obj => obj.draw(context));
+                    context.restore();
+                }
+                addGameObject(object) {
+                    object.layer = this; 
+                    this.gameObjects.push(object);
+                }
+            }
+
+            class GameObject {
+                constructor(game) {
+                    this.game = game;
+                    this.x = 0; this.y = 0;
+                    this.width = 100; this.height = 100;
+                    this.markedForDeletion = false;
+                    this.layer = null; 
+                }
+                update() {}
+                draw(context) {
+                     if (this.game.debug) {
+                        context.strokeStyle = 'white';
+                        context.strokeRect(this.x, this.y, this.width, this.height);
+                    }
+                }
+            }
+            
+            class DecorativeObject extends GameObject {}
+
+            class Moon extends DecorativeObject {
+                constructor(game, x, y, size) {
+                    super(game);
+                    this.x = x;
+                    this.y = y;
+                    this.width = size;
+                    this.height = size;
+                }
+
+                draw(context) {
+                    context.save();
+                    const glowGradient = context.createRadialGradient(this.x, this.y, this.width * 0.4, this.x, this.y, this.width * 0.8);
+                    glowGradient.addColorStop(0, 'rgba(255, 245, 200, 0.4)');
+                    glowGradient.addColorStop(1, 'rgba(255, 245, 200, 0)');
+                    context.fillStyle = glowGradient;
+                    context.fillRect(this.x - this.width, this.y - this.height, this.width * 2, this.height * 2);
+                    const moonGradient = context.createRadialGradient(this.x + this.width * 0.2, this.y - this.height * 0.2, this.width * 0.1, this.x, this.y, this.width * 0.5);
+                    moonGradient.addColorStop(0, '#FFFDE4');
+                    moonGradient.addColorStop(1, '#F4E99B');
+                    context.fillStyle = moonGradient;
+                    context.beginPath();
+                    context.ellipse(this.x, this.y, this.width / 2, this.height / 2.05, Math.PI / 40, 0, Math.PI * 2);
+                    context.fill();
+                    context.fillStyle = 'rgba(0, 0, 0, 0.1)';
+                    context.beginPath();
+                    context.arc(this.x + 20, this.y + 10, 15, 0, Math.PI * 2);
+                    context.fill();
+                    context.beginPath();
+                    context.arc(this.x - 30, this.y - 5, 25, 0, Math.PI * 2);
+                    context.fill();
+                    context.beginPath();
+                    context.arc(this.x + 15, this.y - 35, 10, 0, Math.PI * 2);
+                    context.fill();
+                    context.restore();
+                }
+            }
+
+            class Cloud extends DecorativeObject {
+                constructor(game, x, y) {
+                    super(game);
+                    this.x = x;
+                    this.y = y;
+                    this.width = Math.random() * 100 + 100;
+                    this.height = Math.random() * 50 + 50;
+                    this.speedX = (Math.random() * 0.2 + 0.1);
+                    this.baseAlpha = Math.random() * 0.2 + 0.1;
+                }
+                update(deltaTime) {
+                    this.x += this.speedX * (deltaTime / 16.67);
+                    if (this.x > this.game.worldWidth + this.width) {
+                        this.x = -this.width;
+                    }
+                }
+                draw(context) {
+                    const moon = this.game.moon;
+                    const cloudScreenX = this.x - this.game.cameraX * this.layer.speedModifier;
+                    const moonScreenX = moon.x - this.game.cameraX * moon.layer.speedModifier;
+                    
+                    const distanceX = Math.abs(cloudScreenX - moonScreenX);
+                    const overlapThreshold = (this.width / 2) + (moon.width / 2.5);
+                    
+                    let intensity = 0;
+                    if (distanceX < overlapThreshold) {
+                        intensity = 1 - (distanceX / overlapThreshold);
+                        intensity = Math.pow(intensity, 2);
+                    }
+
+                    const baseColor = [0, 0, 0];
+                    const moonColor = [255, 245, 200];
+                    
+                    const [r, g, b] = lerpColor(baseColor, moonColor, intensity * 0.5).match(/\d+/g).map(Number);
+
+                    const gradient = context.createLinearGradient(this.x, this.y, this.x, this.y + this.height);
+                    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${this.baseAlpha + 0.2})`);
+                    gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, ${this.baseAlpha})`);
+
+                    context.fillStyle = gradient;
+
+                    context.beginPath();
+                    context.ellipse(this.x, this.y, this.width / 2, this.height / 2, 0, 0, Math.PI * 2);
+                    context.ellipse(this.x + this.width * 0.4, this.y, this.width / 2.5, this.height / 2.5, 0, 0, Math.PI * 2);
+                    context.ellipse(this.x - this.width * 0.4, this.y, this.width / 2.5, this.height / 2.5, 0, 0, Math.PI * 2);
+                    context.fill();
+                }
+            }
+            
+            class FakeCloud extends Cloud {}
+            class InteractiveCloud extends Cloud {}
+
+            class Tree extends DecorativeObject {
+                constructor(game, x) {
+                    super(game);
+                    this.x = x;
+                    this.width = Math.random() * 100 + 80;
+                    this.height = (Math.random() * 150 + 150) * 1.3;
+                    this.y = this.game.interactiveLayer.getGroundY(this.x) - this.height;
+                    
+                    const trunkLightness = Math.random() * 5 + 10;
+                    this.trunkColor = `hsl(28, 33%, ${trunkLightness}%)`;
+                    
+                    const crownHue = Math.random() * 20 + 90;
+                    const crownSaturation = 50;
+                    this.crownLightness = Math.random() * 10 + 10;
+                    this.baseCrownColor = [50, 100, 50]; 
+                    this.darkerCrownColor = `hsl(${crownHue}, ${crownSaturation}%, ${this.crownLightness - 5}%)`;
+                    this.crownColor = `hsl(${crownHue}, ${crownSaturation}%, ${this.crownLightness}%)`;
+                }
+                draw(context) {
+                    context.fillStyle = this.trunkColor;
+                    const trunkWidth = this.width * 0.2;
+                    context.fillRect(this.x + this.width / 2 - trunkWidth / 2, this.y + this.height * 0.4, trunkWidth, this.height * 0.6);
+                    
+                    const moon = this.game.moon;
+                    const treeScreenX = this.x - this.game.cameraX * this.layer.speedModifier;
+                    const moonScreenX = moon.x - this.game.cameraX * moon.layer.speedModifier;
+
+                    const distanceX = Math.abs(treeScreenX - moonScreenX);
+                    const overlapThreshold = (this.width / 2) + (moon.width / 2.5);
+                    
+                    let intensity = 0;
+                    if (distanceX < overlapThreshold) {
+                        intensity = 1 - (distanceX / overlapThreshold);
+                        intensity = Math.sqrt(intensity); 
+                    }
+
+                    let fillStyle;
+                    if (intensity > 0) {
+                        const moonColor = [255, 245, 200];
+                        const finalColor = lerpColor(this.baseCrownColor, moonColor, intensity * 0.125); 
+                        fillStyle = finalColor;
+                    } else {
+                        const gradient = context.createLinearGradient(this.x, this.y, this.x + this.width, this.y);
+                        gradient.addColorStop(0, this.darkerCrownColor);
+                        gradient.addColorStop(1, this.crownColor);
+                        fillStyle = gradient;
+                    }
+                    
+                    context.fillStyle = fillStyle;
+                    context.beginPath();
+                    context.ellipse(this.x + this.width / 2, this.y + this.height * 0.3, this.width / 2, this.height * 0.4, 0, 0, Math.PI * 2);
+                    context.fill();
+                }
+            }
+            
+            class Bush extends DecorativeObject {
+                 constructor(game, x) {
+                    super(game);
+                    this.x = x;
+                    this.width = Math.random() * 80 + 50;
+                    this.height = Math.random() * 50 + 40;
+                    this.y = this.game.interactiveLayer.getGroundY(this.x) - this.height;
+                    const bushLightness = Math.random() * 10 + 15;
+                    this.color = `hsl(${Math.random() * 20 + 70}, 60%, ${bushLightness}%)`;
+                }
+                draw(context) {
+                    context.fillStyle = this.color;
+                    context.beginPath();
+                    context.arc(this.x + this.width / 2, this.y + this.height / 2, this.width / 2, 0, Math.PI * 2);
+                    context.arc(this.x + this.width, this.y + this.height / 2, this.width / 2, 0, Math.PI * 2);
+                    context.arc(this.x, this.y + this.height / 2, this.width / 2, 0, Math.PI * 2);
+                    context.fill();
+                }
+            }
+
+            class DecorativeBush extends Bush {
+                constructor(game, x) {
+                    super(game, x);
+                    this.width *= 0.8;
+                    this.height *= 0.8;
+                    this.y = this.game.interactiveLayer.getGroundY(this.x) - this.height;
+                    const bushLightness = Math.random() * 5 + 8;
+                    this.color = `hsl(${Math.random() * 20 + 70}, 40%, ${bushLightness}%)`;
+                }
+            }
+
+            // --- БАЗОВЫЙ КЛАСС ДЛЯ ВСЕХ ПЕРСОНАЖЕЙ ---
+            class Character extends GameObject {
+                 constructor(game) {
+                    super(game);
+                    this.headHeight = 30; 
+                    this.neckHeight = 4;
+                    this.torsoHeight = this.headHeight * 1.5;
+                    this.legLength = this.headHeight * 2;
+                    this.armLength = this.headHeight * 1.8;
+                    this.width = 90;
+                    this.height = this.headHeight + this.neckHeight + this.torsoHeight + this.legLength; 
+                    this.states = [];
+                    this.currentState = null;
+                    this.speed = 0;
+                    this.maxSpeed = GAME_CONFIG.BASE_MAX_SPEED; 
+                    this.airSpeed = 0;
+                    this.vy = 0;
+                    this.weight = 1;
+                    this.jumpStrength = GAME_CONFIG.BASE_JUMP_STRENGTH;
+                    this.frameX = 0;
+                    this.maxFrame = 0;
+                    this.fps = 12;
+                    this.frameTimer = 0;
+                    this.frameInterval = 1000 / this.fps;
+                    this.shurikenCooldown = GAME_CONFIG.BASE_SHURIKEN_COOLDOWN;
+                    this.lastShurikenAttack = 0;
+                    this.shurikenSpawnPoint = {x: 0, y: 0};
+                    this.attackCooldown = GAME_CONFIG.BASE_ATTACK_COOLDOWN;
+                    this.lastAttackTime = 0;
+                    this.facingRight = true;
+                    this.maxHealth = 100;
+                    this.health = this.maxHealth;
+                    this.isDead = false;
+                    this.isHidden = false;
+                    this.rotation = 0;
+                    this.rotationSpeed = 0;
+                    this.cantDie = false; // Invulnerability flag
+                    this.isEnemy = false;
+                    this.isFocused = false;
+                    this.hitboxes = {
+                        head: { x: 0, y: 0, width: 0, height: 0 },
+                        body: { x: 0, y: 0, width: 0, height: 0 }
+                    };
+                    this.swordHitbox = { x: 0, y: 0, width: 0, height: 0 };
+                    this.color = '#1a1a1a'; // Цвет по умолчанию
+                }
+                
+                initializeStates() {
+                    this.states = [new Idle(this), new Running(this), new Jumping(this), new Falling(this), new Attacking(this), new Throwing(this), new Dead(this), new Crouching(this), new AirDead(this), new FunnyCloudDeath(this), new DynamicGroundDeath(this)];
+                    this.currentState = this.states[0];
+                }
+
+                update(deltaTime, input) {
+                    this.currentState.handleInput(input);
+                    
+                    if (this instanceof Player) {
+                        this.updateHiding(deltaTime);
+                    }
+
+                    this.updateHitboxes();
+
+                    if (this.currentState.state !== 'DEAD') {
+                        // Horizontal movement
+                        if (!this.isDead && this.onGround() && this.currentState.state !== 'CROUCHING') {
+                            if (input.keys.includes('KeyD')) {
+                                this.speed = this.maxSpeed;
+                                this.facingRight = true;
+                            } else if (input.keys.includes('KeyA')) {
+                                this.speed = -this.maxSpeed;
+                                this.facingRight = false;
+                            } else {
+                                this.speed = 0;
+                            }
+                        }
+                        
+                        let nextX = this.x + (this.onGround() ? this.speed : this.airSpeed);
+                        if (nextX < 0) {
+                            nextX = 0;
+                            if (!this.onGround()) this.airSpeed = 0;
+                        }
+                        if (nextX > this.game.worldWidth - this.width) {
+                            nextX = this.game.worldWidth - this.width;
+                            if (!this.onGround()) this.airSpeed = 0;
+                        }
+                        this.x = nextX;
+
+                        // Vertical movement (gravity)
+                        this.vy += this.weight;
+                        this.y += this.vy;
+                        const groundY = this.game.interactiveLayer.getGroundY(this.x + this.width / 2);
+
+                        if (this.y + this.height > groundY) {
+                            this.y = groundY - this.height;
+                            this.vy = 0;
+                        }
+                    }
+
+                    if (this.currentState.state === 'AIR_DEAD' || this.currentState.state === 'FUNNY_CLOUD_DEATH' || this.currentState.state === 'DYNAMIC_GROUND_DEATH') {
+                        this.rotation += this.rotationSpeed;
+                    }
+
+                    // Animation timing
+                    if (this.frameTimer > this.frameInterval) {
+                        this.frameTimer = 0;
+                        if (this.frameX < this.maxFrame) this.frameX++;
+                        else if (this.currentState.state !== 'DEAD' && this.currentState.state !== 'AIR_DEAD' && this.currentState.state !== 'FUNNY_CLOUD_DEATH' && this.currentState.state !== 'DYNAMIC_GROUND_DEATH') this.frameX = 0;
+                    } else {
+                        this.frameTimer += deltaTime;
+                    }
+                }
+
+                updateHitboxes() {
+                    const isCrouching = this.currentState.state === 'CROUCHING';
+                    const crouchHeightModifier = isCrouching ? 0.6 : 1;
+                    const crouchYOffset = isCrouching ? this.height * (1 - crouchHeightModifier) : 0;
+
+                    const headRadius = this.headHeight / 2;
+                    
+                    this.hitboxes.head.width = this.headHeight;
+                    this.hitboxes.head.height = this.headHeight * crouchHeightModifier;
+                    this.hitboxes.head.x = this.x + (this.width / 2) - headRadius;
+                    this.hitboxes.head.y = this.y + crouchYOffset;
+
+                    this.hitboxes.body.width = this.headHeight;
+                    this.hitboxes.body.height = (this.torsoHeight + this.legLength) * crouchHeightModifier;
+                    this.hitboxes.body.x = this.x + (this.width / 2) - headRadius;
+                    this.hitboxes.body.y = this.y + this.headHeight * crouchHeightModifier + crouchYOffset;
+
+                    if (this.currentState.state === 'ATTACKING' && this.frameX === 2) {
+                        this.swordHitbox.width = this.armLength * 1.5;
+                        this.swordHitbox.height = this.height * 0.7;
+                        if (this.facingRight) {
+                            this.swordHitbox.x = this.x + this.width;
+                        } else {
+                            this.swordHitbox.x = this.x - this.swordHitbox.width;
+                        }
+                        this.swordHitbox.y = this.y + this.headHeight * 0.5;
+                    } else {
+                        this.swordHitbox.width = 0;
+                        this.swordHitbox.height = 0;
+                    }
+                }
+
+                draw(context) {
+                    context.save();
+                    if (!this.facingRight) {
+                        context.translate(this.x + this.width, 0);
+                        context.scale(-1, 1);
+                        this.drawSilhouette(context, 0, this.y);
+                    } else {
+                        this.drawSilhouette(context, this.x, this.y);
+                    }
+                    context.restore();
+
+                    if (this.game.debug) {
+                        this.drawDebug(context);
+                    }
+                }
+                
+                drawDebug(context) {
+                    context.save();
+                    context.globalAlpha = 0.5;
+                    context.fillStyle = 'cyan';
+                    context.fillRect(this.hitboxes.body.x, this.hitboxes.body.y, this.hitboxes.body.width, this.hitboxes.body.height);
+                    context.fillStyle = 'red';
+                    context.fillRect(this.hitboxes.head.x, this.hitboxes.head.y, this.hitboxes.head.width, this.hitboxes.head.height);
+                    if (this.swordHitbox.width > 0) {
+                        context.fillStyle = 'yellow';
+                        context.fillRect(this.swordHitbox.x, this.swordHitbox.y, this.swordHitbox.width, this.swordHitbox.height);
+                    }
+                    if (this.isHidden) {
+                        context.fillStyle = 'rgba(0, 255, 0, 0.3)';
+                        context.fillRect(this.x, this.y, this.width, this.height);
+                    }
+                    if (this.currentSearchTarget) {
+                        context.strokeStyle = this.searchDirection === 'left' ? 'cyan' : 'orange';
+                        context.lineWidth = 2;
+                        context.beginPath();
+                        context.moveTo(this.x + this.width / 2, this.y + this.height / 2);
+                        context.lineTo(this.currentSearchTarget.x + this.currentSearchTarget.width / 2, this.currentSearchTarget.y + this.currentSearchTarget.height / 2);
+                        context.stroke();
+                    }
+                    if (this instanceof CloudNinja && this.isOnCloud) {
+                        context.strokeStyle = 'yellow';
+                        context.lineWidth = 2;
+                        context.strokeRect(this.groundProjection.x, this.groundProjection.y, this.groundProjection.width, this.groundProjection.height);
+                    }
+                    if (this instanceof NinjaBOSS1 && this.currentTarget) {
+                        context.strokeStyle = 'red';
+                        context.lineWidth = 3;
+                        context.beginPath();
+                        context.moveTo(this.x + this.width / 2, this.y + this.height / 2);
+                        context.lineTo(this.currentTarget.x + this.currentTarget.width / 2, this.currentTarget.y + this.currentTarget.height / 2);
+                        context.stroke();
+                    }
+                    context.restore();
+                }
+
+                drawSilhouette(context, x, y) {
+                    if (this instanceof Player && this.cantDie && Math.floor(this.game.gameTime / 150) % 2) {
+                        return; // Blinking effect for invulnerability
+                    }
+                    context.fillStyle = this.color;
+                    context.strokeStyle = '#333333';
+                    context.lineCap = 'round';
+                    context.lineJoin = 'round';
+
+                    const isCrouching = this.currentState.state === 'CROUCHING';
+                    const crouchModifier = isCrouching ? 0.6 : 1;
+                    const yOffset = isCrouching ? this.height * 0.4 : 0;
+
+                    const headRadius = this.headHeight / 2;
+                    const headX = x + this.width / 2;
+                    const headY = y + headRadius + yOffset;
+                    
+                    const neckY = y + this.headHeight + yOffset;
+                    const torsoY = neckY + this.neckHeight;
+                    const torsoX = headX - headRadius;
+                    
+                    const shoulderY = torsoY + 5;
+                    const leftShoulderX = torsoX;
+                    const rightShoulderX = torsoX + this.headHeight;
+
+                    const hipY = torsoY + this.torsoHeight * crouchModifier;
+                    const leftHipX = torsoX + this.headHeight * 0.25;
+                    const rightHipX = torsoX + this.headHeight * 0.75;
+
+                    const animationCycle = this.game.gameTime * 0.03;
+                    const isMoving = this.speed !== 0;
+                    let torsoLean = (this.currentState.state === 'IDLE' || this.currentState.state === 'ATTACKING' || this.currentState.state === 'THROWING' || (this.currentState.state === 'RUNNING' && isMoving)) ? 0.15 : 0;
+                    
+                    if (this.currentState.state === 'DEAD') torsoLean = (Math.PI / 2) * (this.frameX / this.maxFrame);
+                    if (this.currentState.state === 'AIR_DEAD' || this.currentState.state === 'FUNNY_CLOUD_DEATH' || this.currentState.state === 'DYNAMIC_GROUND_DEATH') torsoLean = this.rotation;
+                    
+                    context.save();
+                    context.translate(x + this.width / 2, y + this.height / 2); // Rotate around center
+                    context.rotate(torsoLean);
+                    context.translate(-(x + this.width / 2), -(y + this.height / 2));
+                    
+                    const isInAir = !this.onGround();
+                    const isRunning = isMoving && !isInAir;
+
+                    this.drawLeg(context, leftHipX, hipY, animationCycle, false, isInAir, !isRunning, isCrouching);
+                    if (this.currentState.state === 'RUNNING') {
+                        this.drawArm(context, leftShoulderX, shoulderY, false, false, animationCycle, false, x);
+                    } else {
+                        this.drawArm(context, leftShoulderX, shoulderY, false, false, 0, false, x);
+                    }
+
+                    context.lineWidth = 2;
+                    context.fillRect(torsoX, torsoY, this.headHeight, this.torsoHeight * crouchModifier);
+                    context.strokeRect(torsoX, torsoY, this.headHeight, this.torsoHeight * crouchModifier);
+                    
+                    const neckWidth = this.headHeight / 3;
+                    const neckX = headX - neckWidth / 2;
+                    context.fillRect(neckX, neckY, neckWidth, this.neckHeight);
+                    context.strokeRect(neckX, neckY, neckWidth, this.neckHeight);
+
+                    context.beginPath();
+                    context.arc(headX, headY, headRadius, 0, Math.PI * 2);
+                    context.fill();
+                    context.stroke();
+                    
+                    if (this.currentState.state !== 'DEAD' && this.currentState.state !== 'AIR_DEAD' && this.currentState.state !== 'FUNNY_CLOUD_DEATH' && this.currentState.state !== 'DYNAMIC_GROUND_DEATH') {
+                        context.save();
+                        context.beginPath();
+                        context.arc(headX, headY, headRadius, 0, Math.PI * 2);
+                        context.clip();
+
+                        const pixelSize = 2;
+                        const eyeSlitY = headY - (pixelSize * 1.5);
+                        const startX = headX + 2;
+
+                        context.fillStyle = '#f0dBC6';
+                        context.fillRect(startX + pixelSize, eyeSlitY, pixelSize * 2, pixelSize);
+                        context.fillRect(startX, eyeSlitY + pixelSize, pixelSize, pixelSize);
+                        context.fillStyle = this.color;
+                        context.fillRect(startX + pixelSize, eyeSlitY + pixelSize, pixelSize, pixelSize);
+                        context.fillStyle = '#f0dBC6';
+                        context.fillRect(startX + pixelSize * 2, eyeSlitY + pixelSize, pixelSize * 2, pixelSize);
+                        context.fillRect(startX + pixelSize, eyeSlitY + pixelSize * 2, pixelSize * 2, pixelSize);
+                        
+                        context.restore();
+                    }
+
+                    this.drawLeg(context, rightHipX, hipY, animationCycle, true, isInAir, !isRunning, isCrouching);
+                    if (this.currentState.state === 'ATTACKING') {
+                        this.drawArm(context, rightShoulderX, shoulderY, true, false, 0, false, x);
+                    } else if (this.currentState.state === 'THROWING') {
+                        this.drawArm(context, rightShoulderX, shoulderY, false, true, 0, false, x);
+                    } else if (this.currentState.state === 'RUNNING') {
+                        this.drawArm(context, rightShoulderX, shoulderY, false, false, animationCycle, true, x);
+                    } else {
+                         this.drawArm(context, rightShoulderX, shoulderY, false, false, 0, false, x);
+                    }
+                    
+                    context.restore();
+                }
+                drawLeg(context, startX, startY, cycle, isOpposite = false, isJumping = false, isIdle = false, isCrouching = false) {
+                    const phase = isOpposite ? Math.PI : 0;
+                    const upperLegLength = this.legLength * 0.5;
+                    const lowerLegLength = this.legLength * 0.5;
+                    let kneeX, kneeY, ankleX, ankleY;
+                    if (this.currentState.state === 'DEAD' || this.currentState.state === 'AIR_DEAD' || this.currentState.state === 'FUNNY_CLOUD_DEATH' || this.currentState.state === 'DYNAMIC_GROUND_DEATH') {
+                        kneeX = startX; kneeY = startY + upperLegLength; ankleX = kneeX; ankleY = kneeY + lowerLegLength;
+                    } else if (isCrouching) {
+                        kneeX = startX + 30; kneeY = startY + upperLegLength * 0.2; ankleX = kneeX - 35; ankleY = kneeY + lowerLegLength * 0.8;
+                    } else if (isJumping) {
+                        kneeX = startX + 10; kneeY = startY + upperLegLength * 0.4; ankleX = startX - 5; ankleY = startY + upperLegLength * 0.9;
+                    } else if (isIdle) {
+                        const hipOffset = isOpposite ? 0 : -15; const kneeBend = isOpposite ? 0.6 : 0.4; const ankleBend = isOpposite ? -0.2 : 0.2;
+                        kneeX = startX + hipOffset + upperLegLength * kneeBend; kneeY = startY + upperLegLength * 0.7; ankleX = kneeX + lowerLegLength * ankleBend; ankleY = kneeY + lowerLegLength * 0.9;
+                    } else { 
+                        const hipAngleBase = Math.PI / 2; const hipSwing = Math.sin(cycle + phase) * 0.7; const hipAngle = hipAngleBase + hipSwing;
+                        kneeX = startX + Math.cos(hipAngle) * upperLegLength; kneeY = startY + Math.sin(hipAngle) * upperLegLength;
+                        const kneeBendFactor = (Math.sin(cycle + phase + Math.PI * 0.7) + 1) * 0.5; const kneeBendAngle = 1.8 * kneeBendFactor; const lowerLegAngle = hipAngle + kneeBendAngle;
+                        ankleX = kneeX + Math.cos(lowerLegAngle) * lowerLegLength; ankleY = kneeY + Math.sin(lowerLegAngle) * lowerLegLength;
+                    }
+                    context.lineWidth = 12; context.beginPath(); context.moveTo(startX, startY); context.lineTo(kneeX, kneeY); context.stroke();
+                    context.lineWidth = 8; context.beginPath(); context.moveTo(kneeX, kneeY); context.lineTo(ankleX, ankleY); context.stroke();
+                    this.drawFoot(context, ankleX, ankleY);
+                }
+                drawFoot(context, x, y) { context.fillStyle = '#1a1a1a'; context.fillRect(x - 10, y, 20, 5); }
+                drawArm(context, startX, startY, isAttacking = false, isThrowing = false, cycle = 0, isOpposite = false, silhouetteX = 0) {
+                    const upperArmLength = this.armLength * 0.5; const lowerArmLength = this.armLength * 0.5;
+                    let elbowX, elbowY, wristX, wristY; const phase = isOpposite ? Math.PI : 0;
+                    if (this.currentState.state === 'DEAD' || this.currentState.state === 'AIR_DEAD' || this.currentState.state === 'FUNNY_CLOUD_DEATH' || this.currentState.state === 'DYNAMIC_GROUND_DEATH') {
+                        elbowX = startX; elbowY = startY + upperArmLength; wristX = elbowX; wristY = elbowY + lowerArmLength;
+                    } else if (isAttacking) {
+                        switch(this.frameX) {
+                            case 0: elbowX = startX - upperArmLength * 0.5; elbowY = startY + upperArmLength * 0.5; wristX = elbowX + lowerArmLength * 0.8; wristY = elbowY - lowerArmLength * 0.2; break;
+                            case 1: elbowX = startX + upperArmLength * 0.8; elbowY = startY + upperArmLength * 0.3; wristX = elbowX + lowerArmLength * 0.9; wristY = elbowY + lowerArmLength * 0.1; break;
+                            case 2: elbowX = startX + upperArmLength * 0.5; elbowY = startY + upperArmLength * 0.8; wristX = elbowX + lowerArmLength; wristY = elbowY; break;
+                            case 3: elbowX = startX + upperArmLength * 0.2; elbowY = startY + upperArmLength; wristX = elbowX + lowerArmLength * 0.8; wristY = elbowY + lowerArmLength * 0.2; break;
+                        }
+                    } else if (isThrowing) {
+                        const throwProgress = this.frameX / this.maxFrame; let shoulderAngle, elbowBendAngle;
+                        if (throwProgress < 0.5) { shoulderAngle = (Math.PI / 2) + (50 * Math.PI / 180) - (throwProgress * 2); elbowBendAngle = -2.2 + (throwProgress * 2);
+                        } else { shoulderAngle = (Math.PI / 2) + (50 * Math.PI / 180) - 1 + ((throwProgress - 0.5) * 2); elbowBendAngle = -1.2 - ((throwProgress - 0.5) * 2); }
+                        elbowX = startX + Math.cos(shoulderAngle) * upperArmLength; elbowY = startY + Math.sin(shoulderAngle) * upperArmLength;
+                        wristX = elbowX + Math.cos(shoulderAngle + elbowBendAngle) * lowerArmLength; wristY = elbowY + Math.sin(shoulderAngle + elbowBendAngle) * lowerArmLength;
+                    } else if (this.currentState.state === 'RUNNING') {
+                        const shoulderAngleBase = Math.PI / 2; const shoulderSwing = Math.sin(cycle + phase) * 0.4; const shoulderAngle = shoulderAngleBase + shoulderSwing; const elbowBendAngle = 1.7;
+                        elbowX = startX + Math.cos(shoulderAngle) * upperArmLength; elbowY = startY + Math.sin(shoulderAngle) * upperArmLength;
+                        wristX = elbowX + Math.cos(shoulderAngle - elbowBendAngle) * lowerArmLength; wristY = elbowY + Math.sin(shoulderAngle - elbowBendAngle) * lowerArmLength;
+                    } else { 
+                        if(isOpposite) { 
+                            const shoulderAngle = (Math.PI / 2) + (50 * Math.PI / 180); elbowX = startX + Math.cos(shoulderAngle) * upperArmLength; elbowY = startY + Math.sin(shoulderAngle) * upperArmLength;
+                            const elbowBendAngle = -2.2; wristX = elbowX + Math.cos(shoulderAngle + elbowBendAngle) * lowerArmLength; wristY = elbowY + Math.sin(shoulderAngle + elbowBendAngle) * lowerArmLength;
+                        } else { elbowX = startX - upperArmLength * 0.3; elbowY = startY + upperArmLength * 0.7; wristX = elbowX + lowerArmLength * 0.3; wristY = elbowY + lowerArmLength * 0.8; }
+                    }
+                    const offsetX = wristX - silhouetteX; this.shurikenSpawnPoint = {x: offsetX, y: wristY - this.y};
+                    context.lineWidth = 12; context.beginPath(); context.moveTo(startX, startY); context.lineTo(elbowX, elbowY); context.stroke();
+                    context.lineWidth = 6; context.beginPath(); context.moveTo(elbowX, elbowY); context.lineTo(wristX, wristY); context.stroke();
+                    context.fillStyle = this.color; context.beginPath(); context.arc(wristX, wristY, 7, 0, Math.PI * 2); context.fill();
+                    if (isAttacking) {
+                        context.strokeStyle = 'white'; context.lineWidth = 4; context.beginPath(); context.moveTo(wristX, wristY); context.lineTo(wristX + this.armLength * 1.5, wristY - 5); context.stroke();
+                        context.strokeStyle = '#333333';
+                    }
+                }
+                setInitialPosition() { this.y = this.game.interactiveLayer.getGroundY(this.x) - this.height; }
+                onGround() {
+                    const groundY = this.game.interactiveLayer.getGroundY(this.x + this.width / 2);
+                    return this.y + this.height >= groundY - 1 && this.vy >= 0;
+                }
+                setState(state) {
+                    this.currentState = this.states[state];
+                    this.currentState.enter();
+                }
+                canThrowShuriken() { return !this.isDead && Date.now() - this.lastShurikenAttack > this.shurikenCooldown; }
+                resetShurikenCooldown() { this.lastShurikenAttack = Date.now(); }
+                spawnShuriken() {
+                    const spawnX = this.facingRight ? this.x + this.shurikenSpawnPoint.x : this.x + this.width - this.shurikenSpawnPoint.x;
+                    const targetX = this instanceof Player ? this.game.input.mouse.x : this.game.player.x + this.game.player.width / 2;
+                    const targetY = this instanceof Player ? this.game.input.mouse.y : this.game.player.y + this.game.player.height / 2;
+                    this.game.interactiveLayer.addGameObject(new Shuriken(this.game, this, spawnX, this.y + this.shurikenSpawnPoint.y, targetX, targetY));
+                }
+                canAttack() { return !this.isDead && Date.now() - this.lastAttackTime > this.attackCooldown; }
+                resetAttackCooldown() { this.lastAttackTime = Date.now(); }
+                takeDamage(amount, attacker = null) { // Добавлен параметр attacker
+                    if (this.isDead || this.cantDie) return;
+                    this.health -= amount;
+                    if (this.health <= 0) {
+                        this.health = 0;
+                        this.isDead = true; 
+                        const currentState = this.currentState.state;
+                        if (this.onGround() && (currentState === 'IDLE' || currentState === 'RUNNING')) {
+                            this.setState(states.DYNAMIC_GROUND_DEATH);
+                        } else if (this.onGround()) {
+                            this.setState(states.DEAD);
+                        } else {
+                            this.setState(states.AIR_DEAD);
+                        }
+                        // Увеличиваем счетчик убийств, если цель является врагом и был указан атакующий
+                        if (this.isEnemy && attacker instanceof Player) {
+                            if (attacker.currentState.state === 'ATTACKING') { // Атака мечом
+                                this.game.score.meleeKills++;
+                            } else if (attacker.currentState.state === 'THROWING') { // Атака сюрикеном
+                                this.game.score.shurikenKills++;
+                            }
+                        }
+                    }
+                }
+                getDistanceTo(other) {
+                    const dx = this.x - other.x;
+                    const dy = this.y - other.y;
+                    return Math.sqrt(dx * dx + dy * dy);
+                }
+            }
+
+            // --- КЛАСС ИГРОКА ---
+            class Player extends Character {
+                constructor(game) {
+                    super(game);
+                    this.x = 200;
+                    this.isFocused = true;
+                    this.respawnTimer = 0;
+                    this.respawnDelay = GAME_CONFIG.PLAYER_RESPAWN_DELAY;
+                    this.canBeHidden = true;
+                    this.hideCooldownTimer = 0;
+                    this.hideCooldownDuration = GAME_CONFIG.PLAYER_HIDE_COOLDOWN;
+                    this.initializeStates();
+                }
+
+                update(deltaTime) {
+                    if (this.isDead) {
+                        this.respawnTimer += deltaTime;
+                        if (this.respawnTimer > this.respawnDelay) {
+                            this.respawn();
+                        }
+                    }
+                    // Обновляем состояние игрока только если игра в состоянии RUNNING
+                    if (this.game.gameState === gameStates.RUNNING) {
+                        super.update(deltaTime, this.game.input);
+                    } else {
+                        // Если игра не запущена, очищаем ввод, чтобы игрок не двигался
+                        this.speed = 0;
+                        this.airSpeed = 0;
+                        this.vy = 0;
+                    }
+                }
+                
+                // Метод takeDamage уже обновлен в Character, не нужно переопределять здесь
+                // takeDamage(amount) {
+                //     ...
+                // }
+
+                updateHiding(deltaTime) {
+                    if (!this.canBeHidden) {
+                        this.hideCooldownTimer += deltaTime;
+                        if (this.hideCooldownTimer > this.hideCooldownDuration) {
+                            this.canBeHidden = true;
+                            this.hideCooldownTimer = 0;
+                        }
+                    }
+
+                    const wasHidden = this.isHidden;
+                    if (this.currentState.state === 'CROUCHING' && this.onGround() && this.canBeHidden) {
+                        this.isHidden = this.game.isCharacterInAnyBush(this);
+                    } else {
+                        this.isHidden = false;
+                    }
+                    
+                    if (this.isHidden && !wasHidden) {
+                        this.game.playerHasHidden();
+                    } else if (!this.isHidden && wasHidden) {
+                        this.game.playerIsSpotted();
+                    }
+                }
+
+                triggerHideCooldown() {
+                    this.canBeHidden = false;
+                    this.hideCooldownTimer = 0;
+                    this.isHidden = false;
+                }
+
+                respawn() {
+                    this.x = 200;
+                    this.y = 0;
+                    this.setInitialPosition();
+                    this.health = this.maxHealth;
+                    this.isDead = false;
+                    this.respawnTimer = 0;
+                    this.canBeHidden = true;
+                    this.hideCooldownTimer = 0;
+                    this.setState(states.IDLE);
+                    this.fps = 12;
+                    this.cantDie = true;
+                    setTimeout(() => {
+                        this.cantDie = false;
+                    }, GAME_CONFIG.PLAYER_INVULNERABILITY_DURATION);
+                }
+            }
+
+            // --- НОВЫЕ АБСТРАКТНЫЕ КЛАССЫ NPC ---
+            class NPC extends Character {
+                constructor(game) {
+                    super(game);
+                }
+            }
+
+            class Enemy extends NPC {
+                constructor(game) {
+                    super(game);
+                    this.isEnemy = true;
+                }
+            }
+
+            class Friend extends NPC {
+                constructor(game) {
+                    super(game);
+                    this.isEnemy = false;
+                }
+            }
+            
+            // --- НОВЫЕ КЛАССЫ ВРАГОВ ---
+            class TreeNinja extends Enemy {
+                constructor(game, x, y) {
+                    super(game);
+                    this.x = x;
+                    this.y = y;
+                    this.initializeStates();
+                    // Логика для древесного ниндзя будет здесь
+                }
+            }
+
+            class CloudNinja extends Enemy {
+                constructor(game, homeCloud) {
+                    super(game);
+                    this.homeCloud = homeCloud;
+                    this.width = 80;
+                    this.height *= 0.9;
+                    this.color = '#F4E99B';
+                    this.isOnCloud = true;
+                    this.weight = 0;
+                    this.groundProjection = { x: 0, y: 0, width: 0, height: 0 };
+                    this.deathTimer = 0;
+                    this.deathDelay = GAME_CONFIG.CLOUDNINJA_DEATH_DELAY; 
+                    this.meleeRange = this.width * 1.2;
+                    this.initializeStates();
+                }
+
+                update(deltaTime) {
+                    if (this.isDead) {
+                        this.deathTimer += deltaTime;
+                        if (this.deathTimer > this.deathDelay) {
+                            this.respawn();
+                            // FIX: After respawning, immediately run the logic for being on the cloud in the same frame
+                            if (this.isOnCloud) {
+                                this.x = this.homeCloud.x + (this.homeCloud.width / 2) - (this.width / 2);
+                                this.y = this.homeCloud.y + (this.homeCloud.height / 2) - this.height;
+                                this.vy = 0;
+                            }
+                        }
+                        super.update(deltaTime, { keys: [], mouse: {} });
+                        return;
+                    }
+                    
+                    if (this.isOnCloud) {
+                        this.x = this.homeCloud.x + (this.homeCloud.width / 2) - (this.width / 2);
+                        this.y = this.homeCloud.y + (this.homeCloud.height / 2) - this.height;
+                        this.vy = 0;
+                        this.updateGroundProjection();
+                        this.checkActivation();
+                        // Обновляем состояние CloudNinja только если игра в состоянии RUNNING
+                        if (this.game.gameState === gameStates.RUNNING) {
+                            super.update(deltaTime, { keys: [], mouse: {} });
+                        }
+                    } else {
+                        const simulatedInput = { keys: [], mouse: { rightPressed: false, leftPressed: false } };
+                        const player = this.game.player;
+                        const distance = this.getDistanceTo(player);
+                        const dx = player.x - this.x;
+
+                        if (distance < this.meleeRange && this.canAttack()) {
+                            simulatedInput.mouse.rightPressed = true;
+                        } else if (this.canThrowShuriken() && Math.random() < 0.025) {
+                            simulatedInput.mouse.leftPressed = true;
+                        } else if (distance > this.meleeRange) {
+                            simulatedInput.keys.push(dx > 0 ? 'KeyD' : 'KeyA');
+                        }
+                        
+                        if (this.onGround() && Math.random() < 0.02) {
+                            simulatedInput.keys.push('Space');
+                        }
+                        // Обновляем состояние CloudNinja только если игра в состоянии RUNNING
+                        if (this.game.gameState === gameStates.RUNNING) {
+                            super.update(deltaTime, simulatedInput);
+                        }
+                    }
+                }
+
+                takeDamage(amount, attacker) { // Передаем attacker
+                    if (this.isDead || this.cantDie) return;
+                    this.health -= amount;
+                    if (this.health <= 0) {
+                        this.health = 0;
+                        this.isDead = true; // FIX: Set isDead immediately
+                        if (this.isOnCloud) {
+                            this.isOnCloud = false;
+                            this.setState(states.FUNNY_CLOUD_DEATH);
+                        } else if (this.onGround()) {
+                            this.setState(states.DEAD);
+                        } else {
+                            this.setState(states.AIR_DEAD);
+                        }
+                        // Увеличиваем счетчик убийств, если цель является врагом и был указан атакующий
+                        if (this.isEnemy && attacker instanceof Player) {
+                            if (attacker.currentState.state === 'ATTACKING') { // Атака мечом
+                                this.game.score.meleeKills++;
+                            } else if (attacker.currentState.state === 'THROWING') { // Атака сюрикеном
+                                this.game.score.shurikenKills++;
+                            }
+                        }
+                    }
+                }
+
+                updateGroundProjection() {
+                    this.groundProjection.x = this.homeCloud.x;
+                    this.groundProjection.width = this.homeCloud.width;
+                    this.groundProjection.y = this.game.interactiveLayer.getGroundY(this.x) - 20;
+                    this.groundProjection.height = 40;
+                }
+
+                checkActivation() {
+                    if (this.game.interactiveLayer.isRectCollision(this.game.player, this.groundProjection)) {
+                        this.activate();
+                    }
+                }
+
+                activate() {
+                    this.isOnCloud = false;
+                    this.weight = 1;
+                    const direction = Math.random() < 0.5 ? -1 : 1;
+                    this.speed = this.maxSpeed * direction;
+                    this.setState(states.JUMPING);
+                    setTimeout(() => {
+                        if (!this.isDead) this.spawnShuriken();
+                    }, 200);
+                }
+
+                respawn() {
+                    this.health = this.maxHealth;
+                    this.isDead = false;
+                    this.isOnCloud = true;
+                    this.weight = 0;
+                    this.vy = 0;
+                    this.deathTimer = 0;
+                    this.setState(states.IDLE);
+                }
+            }
+
+            class NinjaBOSS1 extends Enemy {
+                constructor(game, x, y) {
+                    super(game);
+                    this.x = x;
+                    this.y = y;
+                    this.cantDie = true;
+                    this.color = 'red';
+                    
+                    // Scale up
+                    const scale = GAME_CONFIG.BOSS_SCALE;
+                    this.headHeight *= scale;
+                    this.neckHeight *= scale;
+                    this.torsoHeight *= scale;
+                    this.legLength *= scale;
+                    this.armLength *= scale;
+                    this.width *= scale;
+                    this.height = this.headHeight + this.neckHeight + this.torsoHeight + this.legLength;
+
+                    this.jumpStrength *= GAME_CONFIG.BOSS_JUMP_MULTIPLIER;
+                    this.shurikenCooldown *= GAME_CONFIG.BOSS_SHURIKEN_COOLDOWN_MULTIPLIER;
+
+                    this.runTimer = 0;
+                    this.maxRunTime = GAME_CONFIG.BOSS_MAX_RUN_TIME;
+
+                    this.focusTimer = 0;
+                    this.focusDuration = GAME_CONFIG.BOSS_FOCUS_DURATION;
+                    this.currentTarget = null;
+                    this.initializeStates();
+                }
+
+                update(deltaTime) {
+                    if (this.isDead) return;
+
+                    // Обновляем состояние босса только если игра в состоянии RUNNING
+                    if (this.game.gameState === gameStates.RUNNING) {
+                        this.focusTimer += deltaTime;
+                        if (this.focusTimer > this.focusDuration || !this.currentTarget || this.currentTarget.isDead) {
+                            this.findNewTarget();
+                        }
+
+                        const simulatedInput = { keys: [], mouse: { rightPressed: false, leftPressed: false } };
+                        
+                        if (this.currentTarget) {
+                            const distance = this.getDistanceTo(this.currentTarget);
+                            const dx = this.currentTarget.x - this.x;
+
+                            if (this.onGround()) {
+                                this.runTimer += deltaTime;
+                            }
+
+                            if (this.runTimer > this.maxRunTime) {
+                                if(this.onGround()){
+                                    simulatedInput.keys.push('Space');
+                                    this.runTimer = 0;
+                                }
+                            } else {
+                                simulatedInput.keys.push(dx > 0 ? 'KeyD' : 'KeyA');
+                            }
+
+                            if (this.canThrowShuriken()) {
+                                simulatedInput.mouse.leftPressed = true;
+                            }
+                        }
+                        super.update(deltaTime, simulatedInput);
+                    } else {
+                        // Если игра не запущена, очищаем скорость босса
+                        this.speed = 0;
+                        this.airSpeed = 0;
+                        this.vy = 0;
+                    }
+                }
+
+                findNewTarget() {
+                    const potentialTargets = this.game.interactiveLayer.gameObjects.filter(obj => obj instanceof Character && !obj.isDead && obj !== this);
+                    if (potentialTargets.length > 0) {
+                        if (this.currentTarget) this.currentTarget.isFocused = false;
+                        this.currentTarget = potentialTargets[Math.floor(Math.random() * potentialTargets.length)];
+                        this.currentTarget.isFocused = true;
+                    }
+                    this.focusTimer = 0;
+                }
+
+                spawnShuriken() {
+                    const spawnX = this.facingRight ? this.x + this.shurikenSpawnPoint.x : this.x + this.width - this.shurikenSpawnPoint.x;
+                    const targetX = this.currentTarget.x + this.currentTarget.width / 2;
+                    const targetY = this.currentTarget.y + this.currentTarget.height / 2;
+                    const shuriken = new Shuriken(this.game, this, spawnX, this.y + this.shurikenSpawnPoint.y, targetX, targetY);
+                    shuriken.speedX *= GAME_CONFIG.BOSS_SHURIKEN_SPEED_MULTIPLIER;
+                    shuriken.speedY *= GAME_CONFIG.BOSS_SHURIKEN_SPEED_MULTIPLIER;
+                    this.game.interactiveLayer.addGameObject(shuriken);
+                }
+            }
+
+            // --- ИИ ДЛЯ ВРАГА ---
+            const aiStates = { SEARCHING: 0, CHASING: 1, RETREATING: 2, REPOSITIONING: 3 };
+            class AIState { constructor(state, enemy) { this.state = state; this.enemy = enemy; } }
+            
+            class Searching extends AIState {
+                constructor(enemy) { super('SEARCHING', enemy); }
+                enter() {
+                    this.enemy.speed = 0;
+                    if (!this.enemy.currentSearchTarget) {
+                        let searchPool;
+                        if (this.enemy.searchDirection === 'left') {
+                            searchPool = this.enemy.game.leftBushZone;
+                        } else {
+                            searchPool = this.enemy.game.rightBushZone;
+                        }
+                        
+                        const availableBushes = searchPool.filter(bush => !this.enemy.visitedBushes.includes(bush));
+                        
+                        if (availableBushes.length > 0) {
+                            this.enemy.currentSearchTarget = availableBushes[Math.floor(Math.random() * availableBushes.length)];
+                        } else {
+                            this.enemy.resetSearch();
+                            this.enemy.currentSearchTarget = searchPool[Math.floor(Math.random() * searchPool.length)];
+                        }
+                    }
+                }
+                handleBehavior(player, simulatedInput) {
+                    const isPlayerVisible = !player.isHidden && !player.isDead;
+                    if (isPlayerVisible && this.enemy.getDistanceTo(player) < this.enemy.visionRange) {
+                        this.enemy.setAiState(aiStates.CHASING);
+                        return;
+                    }
+
+                    const target = this.enemy.currentSearchTarget;
+                    if (target) {
+                        const targetX = target.x + target.width / 2;
+                        const distanceToTarget = Math.abs((this.enemy.x + this.enemy.width / 2) - targetX);
+
+                        if (distanceToTarget > this.enemy.width / 2) {
+                            if (targetX > this.enemy.x) simulatedInput.keys.push('KeyD');
+                            else simulatedInput.keys.push('KeyA');
+                        } else {
+                            if (this.enemy.game.isCharacterInSpecificBush(player, target)) {
+                                this.enemy.game.discoverPlayerInBush(player);
+                                this.enemy.setAiState(aiStates.CHASING);
+                                simulatedInput.mouse.rightPressed = true;
+                                return;
+                            }
+
+                            this.enemy.searchWaitTimer += this.enemy.game.deltaTime;
+                            if (this.enemy.searchWaitTimer >= this.enemy.searchWaitDuration) {
+                                this.enemy.searchWaitTimer = 0;
+                                this.enemy.visitedBushes.push(target);
+                                this.enemy.currentSearchTarget = null;
+                                this.enemy.setAiState(aiStates.SEARCHING);
+                            }
+                        }
+                    }
+                }
+            }
+
+            class Chasing extends AIState {
+                 constructor(enemy) { super('CHASING', enemy); }
+                enter() { 
+                    this.enemy.chaseTimer = 0;
+                    this.enemy.resetSearch();
+                }
+                handleBehavior(player, simulatedInput) {
+                    if (player.isHidden || this.enemy.getDistanceTo(player) > this.enemy.visionRange * 1.5 || player.isDead) {
+                        this.enemy.setAiState(aiStates.SEARCHING);
+                        return;
+                    }
+                    this.enemy.chaseTimer += this.enemy.game.deltaTime;
+                    const distance = this.enemy.getDistanceTo(player); const dx = player.x - this.enemy.x;
+                    
+                    if (distance < this.enemy.meleeRange && this.enemy.canAttack()) {
+                        simulatedInput.mouse.rightPressed = true;
+                        this.enemy.setAiState(aiStates.REPOSITIONING); // Switch to reposition after attack
+                    } else if (this.enemy.canThrowShuriken() && Math.random() < 0.015) {
+                        simulatedInput.mouse.leftPressed = true;
+                    } else if (distance > this.enemy.meleeRange) {
+                        simulatedInput.keys.push(dx > 0 ? 'KeyD' : 'KeyA');
+                    }
+                }
+            }
+            class Retreating extends AIState {
+                constructor(enemy) { super('RETREATING', enemy); }
+                enter() { this.enemy.retreatTimer = 0; this.enemy.retreatDuration = Math.random() * 1000 + 500; }
+                handleBehavior(player, simulatedInput) {
+                    if (this.enemy.retreatTimer > this.enemy.retreatDuration || player.isDead) {
+                        this.enemy.setAiState(aiStates.SEARCHING); 
+                        return;
+                    }
+                    this.enemy.retreatTimer += this.enemy.game.deltaTime;
+                    const dx = player.x - this.enemy.x; simulatedInput.keys.push(dx > 0 ? 'KeyA' : 'KeyD');
+                    this.enemy.facingRight = dx > 0;
+                    if (this.enemy.canThrowShuriken() && Math.random() < 0.02) { simulatedInput.mouse.leftPressed = true; }
+                }
+            }
+
+            class Repositioning extends AIState {
+                constructor(enemy) {
+                    super('REPOSITIONING', enemy);
+                }
+                enter() {
+                    this.enemy.repositionTimer = GAME_CONFIG.GROUNDNINJA_REPOSITION_TIME;
+                    this.action = Math.random() < 0.5 ? 'run' : 'jump';
+                    this.direction = Math.random() < 0.5 ? 'left' : 'right';
+                    this.hasJumped = false;
+                }
+                handleBehavior(player, simulatedInput) {
+                    this.enemy.repositionTimer -= this.enemy.game.deltaTime;
+                    if (this.enemy.repositionTimer <= 0) {
+                        this.enemy.setAiState(aiStates.CHASING);
+                        return;
+                    }
+
+                    if (this.action === 'run') {
+                        simulatedInput.keys.push(this.direction === 'left' ? 'KeyA' : 'KeyD');
+                    } else if (this.action === 'jump' && !this.hasJumped && this.enemy.onGround()) {
+                        simulatedInput.keys.push(this.direction === 'left' ? 'KeyA' : 'KeyD');
+                        simulatedInput.keys.push('Space');
+                        this.hasJumped = true;
+                    }
+                }
+            }
+
+
+            // --- КЛАСС ВРАГА ---
+            class GroundNinja extends Enemy {
+                constructor(game, x, searchDirection, slotIndex) {
+                    super(game);
+                    this.x = x;
+                    this.slotIndex = slotIndex;
+                    this.aiStates = [new Searching(this), new Chasing(this), new Retreating(this), new Repositioning(this)];
+                    this.currentAiState = this.aiStates[0];
+                    this.visionRange = 500;
+                    this.meleeRange = this.width * 1.2;
+                    this.chaseDuration = 15000;
+                    this.chaseTimer = 0;
+                    this.retreatTimer = 0;
+                    this.retreatDuration = 0;
+                    this.repositionTimer = 0;
+                    this.shurikenCooldown = 5000;
+                    this.deathTimer = 0;
+                    this.deathDelay = GAME_CONFIG.GROUNDNINJA_DEATH_DELAY;
+
+                    this.visitedBushes = [];
+                    this.currentSearchTarget = null;
+                    this.searchWaitTimer = 0;
+                    this.searchWaitDuration = 1000;
+                    this.searchDirection = searchDirection;
+                    this.initializeStates();
+                }
+
+                update(deltaTime) {
+                    if (this.isDead) {
+                        this.deathTimer += deltaTime;
+                        if (this.deathTimer > this.deathDelay) {
+                            this.markedForDeletion = true;
+                        }
+                        super.update(deltaTime, { keys: [], mouse: {} });
+                    } else {
+                        // Обновляем состояние наземного ниндзя только если игра в состоянии RUNNING
+                        if (this.game.gameState === gameStates.RUNNING) {
+                            const simulatedInput = { keys: [], mouse: { rightPressed: false, leftPressed: false, isRightClickHandled: false, isLeftClickHandled: false } };
+                            this.currentAiState.handleBehavior(this.game.player, simulatedInput);
+                            super.update(deltaTime, simulatedInput);
+                        } else {
+                            // Если игра не запущена, очищаем скорость ниндзя
+                            this.speed = 0;
+                            this.airSpeed = 0;
+                            this.vy = 0;
+                        }
+                    }
+                }
+                
+                draw(context) {
+                    super.draw(context);
+                }
+
+                setAiState(state) {
+                    if (this.isDead) return;
+                    this.currentAiState = this.aiStates[state];
+                    this.currentAiState.enter();
+                }
+
+                resetSearch() {
+                    this.visitedBushes = [];
+                    this.currentSearchTarget = null;
+                    this.searchWaitTimer = 0;
+                }
+            }
+            
+            class Shuriken extends GameObject {
+                constructor(game, owner, x, y, targetX, targetY) {
+                    super(game);
+                    this.owner = owner;
+                    this.width = 20; this.height = 20;
+                    this.x = x - this.width / 2;
+                    this.y = y - this.height / 2;
+                    const angle = Math.atan2(targetY - y, targetX - x);
+                    const speed = GAME_CONFIG.SHURIKEN_SPEED;
+                    this.speedX = Math.cos(angle) * speed;
+                    this.speedY = Math.sin(angle) * speed;
+                    this.angle = 0;
+                }
+                update() {
+                    // Обновляем сюрикен только если игра в состоянии RUNNING
+                    if (this.game.gameState === gameStates.RUNNING) {
+                        this.x += this.speedX;
+                        this.y += this.speedY;
+                        this.angle -= 1.0;
+                        if (this.x > this.game.worldWidth || this.x < 0 || this.y > this.game.worldHeight || this.y < 0) {
+                            this.markedForDeletion = true;
+                        }
+                    }
+                }
+                draw(context) {
+                    context.save();
+                    context.translate(this.x + this.width / 2, this.y + this.height / 2);
+                    context.rotate(this.angle);
+                    const size = this.width; const halfSize = size / 2; const quarterSize = size / 4;
+                    context.fillStyle = 'silver'; context.strokeStyle = '#333333'; context.lineWidth = 2;
+                    context.beginPath();
+                    context.moveTo(halfSize, -halfSize); context.lineTo(0, -quarterSize); context.lineTo(-halfSize, -halfSize);
+                    context.lineTo(-quarterSize, 0); context.lineTo(-halfSize, halfSize); context.lineTo(0, quarterSize);
+                    context.lineTo(halfSize, halfSize); context.lineTo(quarterSize, 0);
+                    context.closePath(); context.fill(); context.stroke();
+                    context.restore();
+                }
+            }
+
+            // --- Главный класс игры ---
+            class Game {
+                constructor(width, height) {
+                    this.width = width; 
+                    this.height = height;
+                    this.worldWidth = width * 6;
+                    this.worldHeight = height;
+                    this.debug = false;
+                    
+                    this.input = new InputHandler(this);
+                    this.interactiveLayer = new InteractiveLayer(this);
+                    this.interactiveLayer.generateTerrain();
+                    
+                    this.layers = [];
+                    
+                    // 1. Moon Layer
+                    const moonLayer = new DecorativeLayer(this, 0.05);
+                    this.moon = new Moon(this, this.worldWidth * 0.75, 250, 360);
+                    moonLayer.addGameObject(this.moon);
+                    this.layers.push(moonLayer);
+                    
+                    // 2. Parallax Layers
+                    this.layers.push(new ParallaxLayer(this, 0.1, '#4a253a', -60, 20, 0.001)); 
+                    this.layers.push(new ParallaxLayer(this, 0.2, '#3a1e2f', -10, 30, 0.002)); 
+
+                    // 3. Cloud Layer & Cloud Ninja Spawning
+                    const cloudLayer = new DecorativeLayer(this, 0.3);
+                    // Create 20 FakeClouds
+                    for (let i = 0; i < 20; i++) {
+                        cloudLayer.addGameObject(new FakeCloud(this, Math.random() * this.worldWidth, Math.random() * this.height * 0.4));
+                    }
+                    // Create 10 InteractiveClouds and their ninjas
+                    for (let i = 0; i < 10; i++) {
+                        const homeCloud = new InteractiveCloud(this, Math.random() * this.worldWidth, Math.random() * this.height * 0.4);
+                        cloudLayer.addGameObject(homeCloud);
+                        const ninja = new CloudNinja(this, homeCloud);
+                        this.interactiveLayer.addGameObject(ninja);
+                    }
+                    this.layers.push(cloudLayer);
+                    
+                    // 4. Far Trees Layer
+                    const farTreesLayer = new DecorativeLayer(this, 0.6);
+                    const numberOfTrees = 50;
+                    const treeSegmentWidth = this.worldWidth / numberOfTrees;
+                    for (let i = 0; i < numberOfTrees; i++) {
+                        const x = (i * treeSegmentWidth) + (Math.random() * treeSegmentWidth * 0.8);
+                        farTreesLayer.addGameObject(new Tree(this, x));
+                        
+                        if (Math.random() > 0.5) {
+                            const bushX = x + Math.random() * 80 - 40;
+                            farTreesLayer.addGameObject(new DecorativeBush(this, bushX));
+                        }
+                    }
+                    this.layers.push(farTreesLayer);
+                    
+                    // 5. Interactive Layer
+                    this.player = new Player(this);
+                    this.player.setInitialPosition();
+                    this.interactiveLayer.addGameObject(this.player);
+
+                    const boss = new NinjaBOSS1(this, this.worldWidth / 2, 0);
+                    boss.setInitialPosition();
+                    this.interactiveLayer.addGameObject(boss);
+
+                    this.layers.push(this.interactiveLayer);
+
+                    // Ground Ninja Spawning
+                    this.maxEnemies = 10;
+                    this.enemySlots = [];
+                    this.initializeEnemySlots();
+
+                    // 6. Foreground Bushes Layer
+                    const foregroundLayer = new DecorativeLayer(this, 1);
+                    this.bushLocations = [];
+                    const numberOfBushes = 30;
+                    const bushSegmentWidth = this.worldWidth / numberOfBushes;
+                    const maxBushWidth = 130;
+                    const padding = 20;
+
+                    for (let i = 0; i < numberOfBushes; i++) {
+                        const placementRange = bushSegmentWidth - maxBushWidth - padding;
+                        const randomOffset = (placementRange > 0) ? Math.random() * placementRange : 0;
+                        const x = (i * bushSegmentWidth) + (padding / 2) + randomOffset;
+                        
+                        const bush = new Bush(this, x);
+                        foregroundLayer.addGameObject(bush);
+                        this.bushLocations.push(bush);
+                    }
+                    this.layers.push(foregroundLayer);
+
+                    const mapCenter = this.worldWidth / 2;
+                    this.leftBushZone = this.bushLocations.filter(bush => bush.x < mapCenter);
+                    this.rightBushZone = this.bushLocations.filter(bush => bush.x >= mapCenter);
+
+                    this.deltaTime = 0;
+                    this.gameTime = 0;
+                    this.cameraX = 0;
+                    this.cameraY = 0;
+
+                    // --- Состояния игры и счетчик убийств ---
+                    this.gameState = gameStates.START_SCREEN;
+                    this.score = { meleeKills: 0, shurikenKills: 0 };
+                }
+
+                initializeEnemySlots() {
+                    const segmentWidth = this.worldWidth / this.maxEnemies;
+                    for (let i = 0; i < this.maxEnemies; i++) {
+                        this.enemySlots.push({
+                            index: i,
+                            x: i * segmentWidth,
+                            width: segmentWidth,
+                            isOccupied: false,
+                        });
+                    }
+                }
+
+                spawnNewEnemy(slot) {
+                    const spawnX = slot.x + (slot.width * 0.1) + (Math.random() * slot.width * 0.8);
+                    const searchDirection = spawnX < this.worldWidth / 2 ? 'right' : 'left';
+                    const enemy = new GroundNinja(this, spawnX, searchDirection, slot.index);
+                    enemy.setInitialPosition();
+                    this.interactiveLayer.addGameObject(enemy);
+                    slot.isOccupied = true;
+                }
+                
+                update(deltaTime) {
+                    this.deltaTime = deltaTime;
+                    this.gameTime += deltaTime;
+
+                    // Обновляем слои только если игра находится в состоянии RUNNING
+                    if (this.gameState === gameStates.RUNNING) {
+                        const enemiesBeforeUpdate = this.interactiveLayer.gameObjects.filter(obj => obj instanceof GroundNinja);
+                        
+                        this.layers.forEach(layer => layer.update(deltaTime));
+
+                        // --- Логика спавна для наземных ниндзя ---
+                        const deletedEnemies = enemiesBeforeUpdate.filter(enemy => enemy.markedForDeletion);
+                        deletedEnemies.forEach(enemy => {
+                            if (this.enemySlots[enemy.slotIndex] && this.enemySlots[enemy.slotIndex].isOccupied) {
+                                this.enemySlots[enemy.slotIndex].isOccupied = false;
+                            }
+                        });
+                        this.enemySlots.forEach(slot => {
+                            if (!slot.isOccupied) {
+                                this.spawnNewEnemy(slot);
+                            }
+                        });
+                        
+                        let targetCameraX = this.player.x + this.player.width / 2 - this.width / 2;
+                        let targetCameraY = 0;
+                        
+                        this.cameraX = Math.max(0, Math.min(targetCameraX, this.worldWidth - this.width));
+                        this.cameraY = Math.max(0, Math.min(targetCameraY, this.worldHeight - this.height));
+                    }
+                }
+
+                isCharacterInAnyBush(character) {
+                    for (const bush of this.bushLocations) {
+                        if (this.isCharacterInSpecificBush(character, bush)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                
+                isCharacterInSpecificBush(character, bush) {
+                    return (
+                        character.x < bush.x + bush.width &&
+                        character.x + character.width > bush.x &&
+                        character.y < bush.y + bush.height &&
+                        character.y + character.height > bush.y
+                    );
+                }
+
+                discoverPlayerInBush(player) {
+                    player.triggerHideCooldown();
+                }
+
+                playerHasHidden() {
+                    const activeNinjas = this.interactiveLayer.gameObjects.filter(obj => obj instanceof GroundNinja && !obj.isDead);
+                    activeNinjas.forEach(ninja => {
+                        if (ninja.currentAiState.state !== 'CHASING') {
+                            ninja.setAiState(aiStates.SEARCHING);
+                        }
+                    });
+                }
+
+                playerIsSpotted() {}
+
+                draw(context) {
+                    context.save();
+                    const skyGradient = context.createLinearGradient(0, 0, 0, this.height);
+                    skyGradient.addColorStop(0, '#0d1b2a'); skyGradient.addColorStop(0.7, '#e07a5f'); skyGradient.addColorStop(1, '#f2cc8f');
+                    context.fillStyle = skyGradient;
+                    context.fillRect(0, 0, this.width, this.height);
+                    
+                    context.translate(-this.cameraX, -this.cameraY);
+                    
+                    this.layers.forEach(layer => layer.draw(context));
+                    
+                    context.restore();
+
+                    // Всегда отрисовываем UI поверх игры
+                    this.drawUI(context);
+                }
+
+                drawUI(context) {
+                    context.save();
+                    // Получаем размеры канваса для центрирования
+                    const centerX = this.width / 2;
+                    const centerY = this.height / 2;
+
+                    // Полупрозрачный фон для UI отрисовывается ТОЛЬКО если игра на стартовом экране или на паузе
+                    if (this.gameState === gameStates.START_SCREEN || this.gameState === gameStates.PAUSED) {
+                        context.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                        context.fillRect(0, 0, this.width, this.height);
+                    }
+
+                    context.textAlign = 'center';
+                    context.textBaseline = 'middle';
+                    context.fillStyle = 'white';
+
+                    if (this.gameState === gameStates.START_SCREEN) {
+                        // Стартовый экран
+                        context.font = 'bold 60px Arial';
+                        context.fillText(GAME_CONFIG.START_SCREEN_TITLE, centerX, centerY - 150);
+
+                        context.font = '24px Arial';
+                        context.fillText(GAME_CONFIG.START_SCREEN_DESCRIPTION, centerX, centerY - 50);
+
+                        context.font = 'bold 20px Arial';
+                        context.fillText(GAME_CONFIG.START_SCREEN_CONTROLS_TITLE, centerX, centerY + 50);
+
+                        context.font = '18px Arial';
+                        context.fillText(GAME_CONFIG.START_SCREEN_CONTROLS, centerX, centerY + 80);
+
+                        // Мигающий текст "Нажмите ENTER"
+                        if (Math.floor(this.gameTime / 500) % 2) { // Мигает каждые 500 мс
+                            context.font = 'bold 30px Arial';
+                            context.fillText(GAME_CONFIG.START_SCREEN_PROMPT, centerX, centerY + 180);
+                        }
+                    } else if (this.gameState === gameStates.PAUSED) {
+                        // Экран паузы
+                        context.font = 'bold 60px Arial';
+                        context.fillText(GAME_CONFIG.PAUSE_SCREEN_TITLE, centerX, centerY - 100);
+
+                        context.font = 'bold 24px Arial';
+                        context.fillText(GAME_CONFIG.PAUSE_SCREEN_STATS_TITLE, centerX, centerY - 20);
+                        
+                        context.font = '20px Arial';
+                        context.fillText(`Сюрикеном: ${this.score.shurikenKills}`, centerX, centerY + 20);
+                        context.fillText(`Мечом: ${this.score.meleeKills}`, centerX, centerY + 50);
+
+                        // Мигающий текст "Нажмите TAB"
+                        if (Math.floor(this.gameTime / 500) % 2) { // Мигает каждые 500 мс
+                            context.font = 'bold 30px Arial';
+                            context.fillText(GAME_CONFIG.PAUSE_SCREEN_PROMPT, centerX, centerY + 150);
+                        }
+                    }
+                    context.restore();
+                }
+            }
+
+            // --- ОБРАБОТЧИК ВВОДА ---
+            class InputHandler {
+                constructor(game) {
+                    this.game = game;
+                    this.keys = [];
+                    this.mouse = {
+                        x: 0,
+                        y: 0,
+                        leftPressed: false,
+                        rightPressed: false,
+                        isLeftClickHandled: false,
+                        isRightClickHandled: false,
+                    };
+
+                    window.addEventListener('keydown', e => {
+                        // Обработка клавиши Enter для старта игры
+                        if (e.code === 'Enter' && this.game.gameState === gameStates.START_SCREEN) {
+                            this.game.gameState = gameStates.RUNNING;
+                            this.keys = []; // Очищаем буфер клавиш при старте
+                        }
+                        // Обработка клавиши Tab для паузы/возобновления
+                        if (e.code === 'Tab') {
+                            if (this.game.gameState === gameStates.RUNNING) {
+                                this.game.gameState = gameStates.PAUSED;
+                                this.keys = []; // Очищаем буфер клавиш при паузе
+                            } else if (this.game.gameState === gameStates.PAUSED) {
+                                this.game.gameState = gameStates.RUNNING;
+                                this.keys = []; // Очищаем буфер клавиш при возобновлении
+                            }
+                        }
+
+                        // Добавляем клавиши для управления игроком только если игра запущена
+                        if (this.game.gameState === gameStates.RUNNING && ['KeyA', 'KeyD', 'Space', 'ShiftLeft'].includes(e.code) && !this.keys.includes(e.code)) {
+                            this.keys.push(e.code);
+                        }
+                        // Debug toggle (всегда работает)
+                        if (e.code === 'KeyG') {
+                            this.game.debug = !this.game.debug;
+                        }
+                    });
+
+                    window.addEventListener('keyup', e => {
+                        if (['KeyA', 'KeyD', 'Space', 'ShiftLeft'].includes(e.code)) {
+                            this.keys.splice(this.keys.indexOf(e.code), 1);
+                        }
+                    });
+
+                    window.addEventListener('mousemove', e => {
+                        // Мышь должна отслеживаться всегда для корректного отображения курсора
+                        this.mouse.x = e.clientX + this.game.cameraX;
+                        this.mouse.y = e.clientY + this.game.cameraY;
+                    });
+
+                    window.addEventListener('mousedown', e => {
+                        // Обработка кликов мышью только если игра запущена
+                        if (this.game.gameState === gameStates.RUNNING) {
+                            if (e.button === 0) { // Left click
+                                this.mouse.leftPressed = true;
+                                this.mouse.isLeftClickHandled = false;
+                            } else if (e.button === 2) { // Right click
+                                this.mouse.rightPressed = true;
+                                this.mouse.isRightClickHandled = false;
+                            }
+                        }
+                    });
+
+                    window.addEventListener('mouseup', e => {
+                        // Сброс состояния кликов всегда, чтобы избежать залипания
+                        if (e.button === 0) { // Left click
+                            this.mouse.leftPressed = false;
+                            this.mouse.isLeftClickHandled = false;
+                        } else if (e.button === 2) { // Right click
+                            this.mouse.rightPressed = false;
+                            this.mouse.isRightClickHandled = false;
+                        }
+                    });
+
+                    canvas.addEventListener('contextmenu', e => e.preventDefault()); // Prevent right-click context menu
+                }
+            }
+
+
+            const game = new Game(canvas.width, canvas.height);
+            let lastTime = 0;
+
+            function gameLoop(timestamp) {
+                const deltaTime = timestamp - lastTime;
+                lastTime = timestamp;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                game.update(deltaTime || 0);
+                game.draw(ctx);
+                requestAnimationFrame(gameLoop);
+            }
+            gameLoop(0);
+        });
+    </script>
+</body>
+</html>
